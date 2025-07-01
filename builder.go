@@ -10,8 +10,10 @@ type Builder struct {
 	numSets        int
 	numWays        int
 	pageSize       uint64
+	log2PageSize   int
 	lowModule      sim.Port
 	numMSHREntry   int
+	lenpwqueue     int
 }
 
 // MakeBuilder returns a Builder
@@ -22,7 +24,9 @@ func MakeBuilder() Builder {
 		numSets:        1,
 		numWays:        32,
 		pageSize:       4096,
+		log2PageSize:   12,
 		numMSHREntry:   4,
+		lenpwqueue:     64,
 	}
 }
 
@@ -78,9 +82,15 @@ func (b Builder) WithNumMSHREntry(num int) Builder {
 	return b
 }
 
+// WithLenPWQueue sets the length of the pending write queue
+func (b Builder) WithLenPWQueue(len int) Builder {
+	b.lenpwqueue = len
+	return b
+}
+
 // Build creates a new TLB
-func (b Builder) Build(name string) *TLB {
-	tlb := &TLB{}
+func (b Builder) Build(name string) *PWC {
+	tlb := &PWC{}
 	tlb.TickingComponent =
 		sim.NewTickingComponent(name, b.engine, b.freq, tlb)
 
@@ -90,6 +100,8 @@ func (b Builder) Build(name string) *TLB {
 	tlb.pageSize = b.pageSize
 	tlb.LowModule = b.lowModule
 	tlb.mshr = newMSHR(b.numMSHREntry)
+	tlb.pwqueue = NewPWQueue(b.lenpwqueue)
+	tlb.log2PageSize = b.log2PageSize
 
 	b.createPorts(name, tlb)
 
@@ -98,7 +110,7 @@ func (b Builder) Build(name string) *TLB {
 	return tlb
 }
 
-func (b Builder) createPorts(name string, tlb *TLB) {
+func (b Builder) createPorts(name string, tlb *PWC) {
 	tlb.topPort = sim.NewLimitNumMsgPort(tlb, b.numReqPerCycle,
 		name+".TopPort")
 	tlb.AddPort("Top", tlb.topPort)

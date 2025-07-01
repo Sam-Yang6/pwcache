@@ -9,8 +9,8 @@ import (
 	"github.com/sarchlab/akita/v3/tracing"
 )
 
-// A TLB is a cache that maintains some page information.
-type TLB struct {
+// A PWC is a cache that maintains some page information.
+type PWC struct {
 	*sim.TickingComponent
 
 	topPort     sim.Port
@@ -23,205 +23,262 @@ type TLB struct {
 	numWays        int
 	pageSize       uint64
 	numReqPerCycle int
+	log2PageSize   int
 
 	Sets []Set
 
 	mshr                mshr
 	respondingMSHREntry *mshrEntry
+	pwqueue             *PWQueue
 
 	isPaused bool
 }
 
-// Reset sets all the entries int he TLB to be invalid
-func (tlb *TLB) reset() {
-	tlb.Sets = make([]Set, tlb.numSets)
-	for i := 0; i < tlb.numSets; i++ {
-		set := NewSet(tlb.numWays)
-		tlb.Sets[i] = set
+// Reset sets all the entries int he PWC to be invalid
+func (pwc *PWC) reset() {
+	pwc.Sets = make([]Set, pwc.numSets)
+	for i := 0; i < pwc.numSets; i++ {
+		set := NewSet(pwc.numWays)
+		pwc.Sets[i] = set
 	}
 }
 
-// Tick defines how TLB update states at each cycle
-func (tlb *TLB) Tick(now sim.VTimeInSec) bool {
+// Tick defines how PWC update states at each cycle
+func (pwc *PWC) Tick(now sim.VTimeInSec) bool {
 	madeProgress := false
 
-	madeProgress = tlb.performCtrlReq(now) || madeProgress
+	madeProgress = pwc.performCtrlReq(now) || madeProgress
 
-	if !tlb.isPaused {
-		for i := 0; i < tlb.numReqPerCycle; i++ {
-			madeProgress = tlb.respondMSHREntry(now) || madeProgress
+	if !pwc.isPaused {
+		for i := 0; i < pwc.numReqPerCycle; i++ {
+			madeProgress = pwc.respondMSHREntry(now) || madeProgress
 		}
 
-		for i := 0; i < tlb.numReqPerCycle; i++ {
-			madeProgress = tlb.lookup(now) || madeProgress
+		for i := 0; i < pwc.numReqPerCycle; i++ {
+			madeProgress = pwc.MSHRlookup(now) || madeProgress
 		}
 
-		for i := 0; i < tlb.numReqPerCycle; i++ {
-			madeProgress = tlb.parseBottom(now) || madeProgress
+		for i := 0; i < pwc.numReqPerCycle; i++ {
+			madeProgress = pwc.PWClookup(now, i) || madeProgress
+		}
+
+		for i := 0; i < pwc.numReqPerCycle; i++ {
+			madeProgress = pwc.parseBottom(now) || madeProgress
 		}
 	}
 
 	return madeProgress
 }
 
-func (tlb *TLB) respondMSHREntry(now sim.VTimeInSec) bool { //正返回的mshr表项
-	if tlb.respondingMSHREntry == nil {
+func (pwc *PWC) respondMSHREntry(now sim.VTimeInSec) bool { //正返回的mshr表项
+	if pwc.respondingMSHREntry == nil {
 		return false
 	}
 
-	mshrEntry := tlb.respondingMSHREntry
+	mshrEntry := pwc.respondingMSHREntry
 	page := mshrEntry.page
 	req := mshrEntry.Requests[0]
 	rspToTop := vm.TranslationRspBuilder{}.
 		WithSendTime(now).
-		WithSrc(tlb.topPort).
+		WithSrc(pwc.topPort).
 		WithDst(req.Src).
 		WithRspTo(req.ID).
 		WithPage(page).
 		Build()
-	err := tlb.topPort.Send(rspToTop)
+	err := pwc.topPort.Send(rspToTop)
 	if err != nil {
 		return false
 	}
 
 	mshrEntry.Requests = mshrEntry.Requests[1:]
 	if len(mshrEntry.Requests) == 0 {
-		tlb.respondingMSHREntry = nil
+		pwc.respondingMSHREntry = nil
 	}
 
-	tracing.TraceReqComplete(req, tlb)
+	tracing.TraceReqComplete(req, pwc)
 	return true
 }
 
-func (tlb *TLB) lookup(now sim.VTimeInSec) bool {
-	msg := tlb.topPort.Peek()
+func (pwc *PWC) MSHRlookup(now sim.VTimeInSec) bool { //在mshr中查找
+	msg := pwc.topPort.Peek()
 	if msg == nil {
 		return false
 	}
 
 	req := msg.(*vm.TranslationReq)
 
-	mshrEntry := tlb.mshr.Query(req.PID, req.VAddr) //在mshr中查找
+	mshrEntry := pwc.mshr.Query(req.PID, req.VAddr) //在mshr中查找
 	if mshrEntry != nil {                           //如果找到了
-		return tlb.processTLBMSHRHit(now, mshrEntry, req) //处理mshr命中
+		return pwc.processPWCMSHRHit(now, mshrEntry, req) //处理mshr命中
+	} else {
+		return pwc.processPWCMSHRMISS(now, req)
 	}
-
-	setID := tlb.vAddrToSetID(req.VAddr) //计算setID
-	set := tlb.Sets[setID]
-	wayID, page, found := set.Lookup(req.PID, req.VAddr) //在set中查找
-	if found && page.Valid {                             //如果找到了且有效
-		return tlb.handleTranslationHit(now, req, setID, wayID, page) //处理tlb命中
+}
+func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
+	pwe, err := pwc.pwqueue.Index(i)
+	if err != nil {
+		return false
 	}
+	req := pwe.req
+	l4index := req.VAddr >> (pwc.log2PageSize + 27) << (pwc.log2PageSize + 27)
+	l3index := req.VAddr << 25 >> 25 >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
+	l2index := req.VAddr << 34 >> 34 >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
 
-	return tlb.handleTranslationMiss(now, req) //处理tlb未命中
+	setID := pwc.vAddrToSetID(l4index) //计算setID
+	set := pwc.Sets[setID]
+	_, _, foundl4 := set.Lookup(req.PID, l4index) //在set中查找
+
+	setID = pwc.vAddrToSetID(l3index) //计算setID
+	set = pwc.Sets[setID]
+	_, _, foundl3 := set.Lookup(req.PID, l3index) //在set中查找
+
+	setID = pwc.vAddrToSetID(l2index) //计算setID
+	set = pwc.Sets[setID]
+	_, _, foundl2 := set.Lookup(req.PID, l2index) //在set中查找
+
+	if foundl4 {
+		if foundl3 {
+			if foundl2 {
+				pwc.pwqueue.Update(i, 3)
+				tracing.TraceReqReceive(req, pwc)
+				tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l2hit")
+
+				return true
+			}
+			pwc.pwqueue.Update(i, 2)
+			tracing.TraceReqReceive(req, pwc)
+			tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l3hit")
+			return true
+		}
+		pwc.pwqueue.Update(i, 1)
+		tracing.TraceReqReceive(req, pwc)
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l4hit")
+		return true
+	}
+	return false
 }
 
-func (tlb *TLB) handleTranslationHit( //tlb命中
+func (pwc *PWC) handleTranslationHit( //pwc命中
 	now sim.VTimeInSec,
 	req *vm.TranslationReq,
 	setID, wayID int,
 	page vm.Page,
 ) bool {
-	ok := tlb.sendRspToTop(now, req, page) //发送rsp到top
+	ok := pwc.sendRspToTop(now, req, page) //发送rsp到top
 	if !ok {
 		return false
 	}
 
-	tlb.visit(setID, wayID)
-	tlb.topPort.Retrieve(now) //从top端口取走req
+	pwc.visit(setID, wayID)
+	pwc.topPort.Retrieve(now) //从top端口取走req
 	//记录
-	tracing.TraceReqReceive(req, tlb)
-	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, tlb), tlb, "hit")
-	tracing.TraceReqComplete(req, tlb)
+	tracing.TraceReqReceive(req, pwc)
+	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
+	tracing.TraceReqComplete(req, pwc)
 
 	return true
 }
 
-func (tlb *TLB) handleTranslationMiss( //处理tlb未命中
+func (pwc *PWC) handleTranslationMiss( //处理pwc未命中
 	now sim.VTimeInSec,
 	req *vm.TranslationReq,
 ) bool {
-	if tlb.mshr.IsFull() {
+	if pwc.mshr.IsFull() {
 		return false
 	}
 
-	fetched := tlb.fetchBottom(now, req) //向下层的部件发送翻译请求
+	fetched := pwc.fetchBottom(now, req) //向下层的部件发送翻译请求
 	if fetched {
-		tlb.topPort.Retrieve(now) //从top端口取走req
-		tracing.TraceReqReceive(req, tlb)
-		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, tlb), tlb, "miss")
+		pwc.topPort.Retrieve(now) //从top端口取走req
+		tracing.TraceReqReceive(req, pwc)
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "miss")
 		return true
 	}
 
 	return false
 }
 
-func (tlb *TLB) vAddrToSetID(vAddr uint64) (setID int) {
-	return int(vAddr / tlb.pageSize % uint64(tlb.numSets))
+func (pwc *PWC) vAddrToSetID(vAddr uint64) (setID int) {
+	return int(vAddr / pwc.pageSize % uint64(pwc.numSets))
 }
 
-func (tlb *TLB) sendRspToTop(
+func (pwc *PWC) sendRspToTop(
 	now sim.VTimeInSec,
 	req *vm.TranslationReq,
 	page vm.Page,
 ) bool {
 	rsp := vm.TranslationRspBuilder{}.
 		WithSendTime(now).
-		WithSrc(tlb.topPort).
+		WithSrc(pwc.topPort).
 		WithDst(req.Src).
 		WithRspTo(req.ID).
 		WithPage(page).
 		Build()
 
-	err := tlb.topPort.Send(rsp) //topport发送rsp
+	err := pwc.topPort.Send(rsp) //topport发送rsp
 
 	return err == nil
 }
 
-func (tlb *TLB) processTLBMSHRHit( //处理MSHR命中
+func (pwc *PWC) processPWCMSHRHit( //处理MSHR命中
 	now sim.VTimeInSec,
 	mshrEntry *mshrEntry,
 	req *vm.TranslationReq,
 ) bool {
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 
-	tlb.topPort.Retrieve(now)
-	tracing.TraceReqReceive(req, tlb)
-	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, tlb), tlb, "mshr-hit")
+	pwc.topPort.Retrieve(now)
+	tracing.TraceReqReceive(req, pwc)
+	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
 
 	return true
 }
 
-func (tlb *TLB) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq) bool { //从bottom端口发送翻译请求
-	fetchBottom := vm.TranslationReqBuilder{}.
-		WithSendTime(now).
-		WithSrc(tlb.bottomPort).
-		WithDst(tlb.LowModule).
-		WithPID(req.PID).
-		WithVAddr(req.VAddr).
-		WithDeviceID(req.DeviceID).
-		Build()
-	err := tlb.bottomPort.Send(fetchBottom)
+func (pwc *PWC) processPWCMSHRMISS( //处理MSHR未命中
+	now sim.VTimeInSec,
+	req *vm.TranslationReq,
+) bool {
+	mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
+	mshrEntry.Requests = append(mshrEntry.Requests, req)
+
+	pwq := newpwqueueentry(req, 0) //把查找请求加入pwcache
+	err := pwc.pwqueue.Enqueue(pwq)
 	if err != nil {
 		return false
 	}
 
-	mshrEntry := tlb.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
+	return true
+}
+func (pwc *PWC) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq) bool { //从bottom端口发送翻译请求
+	fetchBottom := vm.TranslationReqBuilder{}.
+		WithSendTime(now).
+		WithSrc(pwc.bottomPort).
+		WithDst(pwc.LowModule).
+		WithPID(req.PID).
+		WithVAddr(req.VAddr).
+		WithDeviceID(req.DeviceID).
+		Build()
+	err := pwc.bottomPort.Send(fetchBottom)
+	if err != nil {
+		return false
+	}
+
+	mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 	mshrEntry.reqToBottom = fetchBottom
 
-	tracing.TraceReqInitiate(fetchBottom, tlb,
-		tracing.MsgIDAtReceiver(req, tlb))
+	tracing.TraceReqInitiate(fetchBottom, pwc,
+		tracing.MsgIDAtReceiver(req, pwc))
 
 	return true
 }
 
-func (tlb *TLB) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rsp
-	if tlb.respondingMSHREntry != nil {
+func (pwc *PWC) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rsp
+	if pwc.respondingMSHREntry != nil {
 		return false
 	}
 
-	item := tlb.bottomPort.Peek()
+	item := pwc.bottomPort.Peek()
 	if item == nil {
 		return false
 	}
@@ -229,45 +286,66 @@ func (tlb *TLB) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rs
 	rsp := item.(*vm.TranslationRsp)
 	page := rsp.Page
 
-	mshrEntryPresent := tlb.mshr.IsEntryPresent(rsp.Page.PID, rsp.Page.VAddr)
+	mshrEntryPresent := pwc.mshr.IsEntryPresent(rsp.Page.PID, rsp.Page.VAddr)
 	if !mshrEntryPresent {
-		tlb.bottomPort.Retrieve(now)
+		pwc.bottomPort.Retrieve(now)
 		return true
 	}
+	l4index := page.VAddr >> (pwc.log2PageSize + 27) << (pwc.log2PageSize + 27)
+	l3index := page.VAddr << 25 >> 25 >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
+	l2index := page.VAddr << 34 >> 34 >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
 
-	setID := tlb.vAddrToSetID(page.VAddr)
-	set := tlb.Sets[setID]
-	wayID, ok := tlb.Sets[setID].Evict()
+	setID := pwc.vAddrToSetID(l4index)
+	set := pwc.Sets[setID]
+	wayID, ok := pwc.Sets[setID].Evict()
 	if !ok {
 		panic("failed to evict")
 	}
-	set.Update(wayID, page) //把页表项保存在TLB中
+	set.Update(wayID, page) //把l4index保存在PWC中
 	set.Visit(wayID)
 
-	mshrEntry := tlb.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
-	tlb.respondingMSHREntry = mshrEntry
+	setID = pwc.vAddrToSetID(l3index)
+	set = pwc.Sets[setID]
+	wayID, ok = pwc.Sets[setID].Evict()
+	if !ok {
+		panic("failed to evict")
+	}
+	set.Update(wayID, page) //把l3index页表项保存在PWC中
+	set.Visit(wayID)
+
+	setID = pwc.vAddrToSetID(l2index)
+	set = pwc.Sets[setID]
+	wayID, ok = pwc.Sets[setID].Evict()
+	if !ok {
+		panic("failed to evict")
+	}
+	set.Update(wayID, page) //把l2index保存在PWC中
+	set.Visit(wayID)
+
+	mshrEntry := pwc.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
+	pwc.respondingMSHREntry = mshrEntry
 	mshrEntry.page = page
 
-	tlb.mshr.Remove(rsp.Page.PID, rsp.Page.VAddr)
-	tlb.bottomPort.Retrieve(now)
-	tracing.TraceReqFinalize(mshrEntry.reqToBottom, tlb)
+	pwc.mshr.Remove(rsp.Page.PID, rsp.Page.VAddr)
+	pwc.bottomPort.Retrieve(now)
+	tracing.TraceReqFinalize(mshrEntry.reqToBottom, pwc)
 
 	return true
 }
 
-func (tlb *TLB) performCtrlReq(now sim.VTimeInSec) bool { //处理控制请求
-	item := tlb.controlPort.Peek()
+func (pwc *PWC) performCtrlReq(now sim.VTimeInSec) bool { //处理控制请求
+	item := pwc.controlPort.Peek()
 	if item == nil {
 		return false
 	}
 
-	item = tlb.controlPort.Retrieve(now)
+	item = pwc.controlPort.Retrieve(now)
 
 	switch req := item.(type) {
 	case *FlushReq:
-		return tlb.handleTLBFlush(now, req)
+		return pwc.handlePWCFlush(now, req)
 	case *RestartReq:
-		return tlb.handleTLBRestart(now, req)
+		return pwc.handlePWCRestart(now, req)
 	default:
 		log.Panicf("cannot process request %s", reflect.TypeOf(req))
 	}
@@ -275,26 +353,26 @@ func (tlb *TLB) performCtrlReq(now sim.VTimeInSec) bool { //处理控制请求
 	return true
 }
 
-func (tlb *TLB) visit(setID, wayID int) {
-	set := tlb.Sets[setID]
+func (pwc *PWC) visit(setID, wayID int) {
+	set := pwc.Sets[setID]
 	set.Visit(wayID)
 }
 
-func (tlb *TLB) handleTLBFlush(now sim.VTimeInSec, req *FlushReq) bool {
+func (pwc *PWC) handlePWCFlush(now sim.VTimeInSec, req *FlushReq) bool {
 	rsp := FlushRspBuilder{}.
-		WithSrc(tlb.controlPort).
+		WithSrc(pwc.controlPort).
 		WithDst(req.Src).
 		WithSendTime(now).
 		Build()
 
-	err := tlb.controlPort.Send(rsp)
+	err := pwc.controlPort.Send(rsp)
 	if err != nil {
 		return false
 	}
 
 	for _, vAddr := range req.VAddr {
-		setID := tlb.vAddrToSetID(vAddr)
-		set := tlb.Sets[setID]
+		setID := pwc.vAddrToSetID(vAddr)
+		set := pwc.Sets[setID]
 		wayID, page, found := set.Lookup(req.PID, vAddr)
 		if !found {
 			continue
@@ -304,31 +382,31 @@ func (tlb *TLB) handleTLBFlush(now sim.VTimeInSec, req *FlushReq) bool {
 		set.Update(wayID, page)
 	}
 
-	tlb.mshr.Reset()
-	tlb.isPaused = true
+	pwc.mshr.Reset()
+	pwc.isPaused = true
 	return true
 }
 
-func (tlb *TLB) handleTLBRestart(now sim.VTimeInSec, req *RestartReq) bool {
+func (pwc *PWC) handlePWCRestart(now sim.VTimeInSec, req *RestartReq) bool {
 	rsp := RestartRspBuilder{}.
 		WithSendTime(now).
-		WithSrc(tlb.controlPort).
+		WithSrc(pwc.controlPort).
 		WithDst(req.Src).
 		Build()
 
-	err := tlb.controlPort.Send(rsp)
+	err := pwc.controlPort.Send(rsp)
 	if err != nil {
 		return false
 	}
 
-	tlb.isPaused = false
+	pwc.isPaused = false
 
-	for tlb.topPort.Retrieve(now) != nil {
-		tlb.topPort.Retrieve(now)
+	for pwc.topPort.Retrieve(now) != nil {
+		pwc.topPort.Retrieve(now)
 	}
 
-	for tlb.bottomPort.Retrieve(now) != nil {
-		tlb.bottomPort.Retrieve(now)
+	for pwc.bottomPort.Retrieve(now) != nil {
+		pwc.bottomPort.Retrieve(now)
 	}
 
 	return true
