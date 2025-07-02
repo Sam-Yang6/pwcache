@@ -1,6 +1,9 @@
 package pwcache
 
-import "github.com/sarchlab/akita/v3/sim"
+import (
+	"github.com/Sam-Yang6/pwcache/pwqueue"
+	"github.com/sarchlab/akita/v3/sim"
+)
 
 // A Builder can build TLBs
 type Builder struct {
@@ -100,7 +103,7 @@ func (b Builder) Build(name string) *PWC {
 	tlb.pageSize = b.pageSize
 	tlb.LowModule = b.lowModule
 	tlb.mshr = newMSHR(b.numMSHREntry)
-	tlb.pwqueue = NewPWQueue(b.lenpwqueue)
+	tlb.pwqueue = pwqueue.NewPWQueue(b.lenpwqueue)
 	tlb.log2PageSize = b.log2PageSize
 
 	b.createPorts(name, tlb)

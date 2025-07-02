@@ -4,6 +4,8 @@ import (
 	"log"
 	"reflect"
 
+	"github.com/Sam-Yang6/gmmu/pwcache/pwqueue"
+	"github.com/Sam-Yang6/gmmu/pwcreq"
 	"github.com/sarchlab/akita/v3/mem/vm"
 	"github.com/sarchlab/akita/v3/sim"
 	"github.com/sarchlab/akita/v3/tracing"
@@ -16,8 +18,7 @@ type PWC struct {
 	topPort     sim.Port
 	bottomPort  sim.Port
 	controlPort sim.Port
-
-	LowModule sim.Port
+	LowModule   sim.Port
 
 	numSets        int
 	numWays        int
@@ -29,7 +30,7 @@ type PWC struct {
 
 	mshr                mshr
 	respondingMSHREntry *mshrEntry
-	pwqueue             *PWQueue
+	pwqueue             *pwqueue.PWQueue
 
 	isPaused bool
 }
@@ -119,7 +120,18 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 	if err != nil {
 		return false
 	}
-	req := pwe.req
+
+	if pwe.Cyclesleft != 0 { //未达到pwc的访问延迟
+		pwe.Cyclesleft--
+		return true
+	}
+
+	if pwe.Inpwcache { //已经进入pwcache
+		return false
+	}
+
+	pwe.Inpwcache = true
+	req := pwe.Req
 	l4index := req.VAddr >> (pwc.log2PageSize + 27) << (pwc.log2PageSize + 27)
 	l3index := req.VAddr << 25 >> 25 >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
 	l2index := req.VAddr << 34 >> 34 >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
@@ -139,23 +151,26 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 	if foundl4 {
 		if foundl3 {
 			if foundl2 {
-				pwc.pwqueue.Update(i, 3)
+				pwc.pwqueue.Updatehitl(i, 3)
 				tracing.TraceReqReceive(req, pwc)
 				tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l2hit")
-
+				_ = pwc.fetchBottom(now, req)
 				return true
 			}
-			pwc.pwqueue.Update(i, 2)
+			pwc.pwqueue.Updatehitl(i, 2)
 			tracing.TraceReqReceive(req, pwc)
 			tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l3hit")
 			return true
 		}
-		pwc.pwqueue.Update(i, 1)
+		pwc.pwqueue.Updatehitl(i, 1)
 		tracing.TraceReqReceive(req, pwc)
 		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l4hit")
 		return true
 	}
-	return false
+	pwc.pwqueue.Updatehitl(i, 0)
+	tracing.TraceReqReceive(req, pwc)
+	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "miss")
+	return true
 }
 
 func (pwc *PWC) handleTranslationHit( //pwc命中
@@ -241,7 +256,7 @@ func (pwc *PWC) processPWCMSHRMISS( //处理MSHR未命中
 	mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 
-	pwq := newpwqueueentry(req, 0) //把查找请求加入pwcache
+	pwq := pwqueue.Newpwqueueentry(req, 0) //把查找请求加入pwcache
 	err := pwc.pwqueue.Enqueue(pwq)
 	if err != nil {
 		return false
@@ -250,7 +265,7 @@ func (pwc *PWC) processPWCMSHRMISS( //处理MSHR未命中
 	return true
 }
 func (pwc *PWC) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq) bool { //从bottom端口发送翻译请求
-	fetchBottom := vm.TranslationReqBuilder{}.
+	fetchBottom := pwcreq.TranslationReqBuilder{}.
 		WithSendTime(now).
 		WithSrc(pwc.bottomPort).
 		WithDst(pwc.LowModule).
@@ -263,8 +278,9 @@ func (pwc *PWC) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq) bool { /
 		return false
 	}
 
-	mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
-	mshrEntry.Requests = append(mshrEntry.Requests, req)
+	//mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
+	//mshrEntry.Requests = append(mshrEntry.Requests, req)
+	mshrEntry := pwc.mshr.Query(req.PID, req.VAddr)
 	mshrEntry.reqToBottom = fetchBottom
 
 	tracing.TraceReqInitiate(fetchBottom, pwc,
@@ -326,7 +342,8 @@ func (pwc *PWC) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rs
 	pwc.respondingMSHREntry = mshrEntry
 	mshrEntry.page = page
 
-	pwc.mshr.Remove(rsp.Page.PID, rsp.Page.VAddr)
+	pwc.mshr.Remove(rsp.Page.PID, rsp.Page.VAddr)    //从mshr中移除
+	pwc.pwqueue.Remove(rsp.Page.PID, rsp.Page.VAddr) //从pwqueue中移除
 	pwc.bottomPort.Retrieve(now)
 	tracing.TraceReqFinalize(mshrEntry.reqToBottom, pwc)
 
