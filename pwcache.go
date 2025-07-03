@@ -24,7 +24,7 @@ type PWC struct {
 	numWays        int
 	pageSize       uint64
 	numReqPerCycle int
-	log2PageSize   int
+	log2PageSize   uint64
 
 	Sets []Set
 

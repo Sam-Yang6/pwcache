@@ -13,7 +13,7 @@ type Builder struct {
 	numSets        int
 	numWays        int
 	pageSize       uint64
-	log2PageSize   int
+	log2PageSize   uint64
 	lowModule      sim.Port
 	numMSHREntry   int
 	lenpwqueue     int
@@ -92,7 +92,7 @@ func (b Builder) WithLenPWQueue(len int) Builder {
 }
 
 // WithLog2PageSize sets the log2 of the page size
-func (b Builder) WithLog2PageSize(n int) Builder {
+func (b Builder) WithLog2PageSize(n uint64) Builder {
 	b.log2PageSize = n
 	return b
 }
