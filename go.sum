@@ -1,5 +1,3 @@
-github.com/Sam-Yang6/gmmu v0.0.0-20250702031746-7ba130bc7a84 h1:a5VYXtxpfSxtnA4qM8ORSYleoOfUuMF86IZFGpWFPdA=
-github.com/Sam-Yang6/gmmu v0.0.0-20250702031746-7ba130bc7a84/go.mod h1:6NihwheyxTyXoDRNEC8nor4JmPYbeWrDYfHi53YhB7o=
 github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/go-logr/logr v1.2.4 h1:g01GSCwiDw2xSZfjJ2/T9M+S6pFdcNtFYsp+Y43HYDQ=
