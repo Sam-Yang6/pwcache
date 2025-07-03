@@ -5,7 +5,7 @@ import (
 	"github.com/sarchlab/akita/v3/sim"
 )
 
-// A Builder can build TLBs
+// A Builder can build PWC
 type Builder struct {
 	engine         sim.Engine
 	freq           sim.Freq
@@ -88,6 +88,12 @@ func (b Builder) WithNumMSHREntry(num int) Builder {
 // WithLenPWQueue sets the length of the pending write queue
 func (b Builder) WithLenPWQueue(len int) Builder {
 	b.lenpwqueue = len
+	return b
+}
+
+// WithLog2PageSize sets the log2 of the page size
+func (b Builder) WithLog2PageSize(n int) Builder {
+	b.log2PageSize = n
 	return b
 }
 

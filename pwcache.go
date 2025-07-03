@@ -4,8 +4,8 @@ import (
 	"log"
 	"reflect"
 
-	"github.com/Sam-Yang6/gmmu/pwcache/pwqueue"
-	"github.com/Sam-Yang6/gmmu/pwcreq"
+	"github.com/Sam-Yang6/pwcache/pwqueue"
+
 	"github.com/sarchlab/akita/v3/mem/vm"
 	"github.com/sarchlab/akita/v3/sim"
 	"github.com/sarchlab/akita/v3/tracing"
@@ -59,7 +59,7 @@ func (pwc *PWC) Tick(now sim.VTimeInSec) bool {
 			madeProgress = pwc.MSHRlookup(now) || madeProgress
 		}
 
-		for i := 0; i < pwc.numReqPerCycle; i++ {
+		for i := 0; i < 8; i++ { //GMMU 8个page table walker
 			madeProgress = pwc.PWClookup(now, i) || madeProgress
 		}
 
@@ -133,106 +133,56 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 	pwe.Inpwcache = true
 	req := pwe.Req
 	l4index := req.VAddr >> (pwc.log2PageSize + 27) << (pwc.log2PageSize + 27)
-	l3index := req.VAddr << 25 >> 25 >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
-	l2index := req.VAddr << 34 >> 34 >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
+	l3index := req.VAddr >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
+	l2index := req.VAddr >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
 
-	setID := pwc.vAddrToSetID(l4index) //计算setID
+	setID := pwc.vAddrToSetID(l2index) //计算setID
 	set := pwc.Sets[setID]
-	_, _, foundl4 := set.Lookup(req.PID, l4index) //在set中查找
+	wayID, _, foundl2 := set.Lookup(req.PID, l2index) //在set中查找
+
+	if foundl2 {
+		pwc.visit(setID, wayID)
+		pwc.pwqueue.Updatehitl(i, 3)
+		tracing.TraceReqReceive(req, pwc)
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l2hit")
+		_ = pwc.fetchBottom(now, req, 3)
+		return true
+	}
 
 	setID = pwc.vAddrToSetID(l3index) //计算setID
 	set = pwc.Sets[setID]
-	_, _, foundl3 := set.Lookup(req.PID, l3index) //在set中查找
+	wayID, _, foundl3 := set.Lookup(req.PID, l3index) //在set中查找
 
-	setID = pwc.vAddrToSetID(l2index) //计算setID
+	if foundl3 {
+		pwc.visit(setID, wayID)
+		pwc.pwqueue.Updatehitl(i, 2)
+		tracing.TraceReqReceive(req, pwc)
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l3hit")
+		_ = pwc.fetchBottom(now, req, 2)
+		return true
+	}
+
+	setID = pwc.vAddrToSetID(l4index) //计算setID
 	set = pwc.Sets[setID]
-	_, _, foundl2 := set.Lookup(req.PID, l2index) //在set中查找
+	wayID, _, foundl4 := set.Lookup(req.PID, l4index) //在set中查找
 
 	if foundl4 {
-		if foundl3 {
-			if foundl2 {
-				pwc.pwqueue.Updatehitl(i, 3)
-				tracing.TraceReqReceive(req, pwc)
-				tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l2hit")
-				_ = pwc.fetchBottom(now, req)
-				return true
-			}
-			pwc.pwqueue.Updatehitl(i, 2)
-			tracing.TraceReqReceive(req, pwc)
-			tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l3hit")
-			return true
-		}
+		pwc.visit(setID, wayID)
 		pwc.pwqueue.Updatehitl(i, 1)
 		tracing.TraceReqReceive(req, pwc)
 		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l4hit")
+		_ = pwc.fetchBottom(now, req, 1)
 		return true
 	}
 	pwc.pwqueue.Updatehitl(i, 0)
 	tracing.TraceReqReceive(req, pwc)
 	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "miss")
+	_ = pwc.fetchBottom(now, req, 0)
 	return true
-}
-
-func (pwc *PWC) handleTranslationHit( //pwc命中
-	now sim.VTimeInSec,
-	req *vm.TranslationReq,
-	setID, wayID int,
-	page vm.Page,
-) bool {
-	ok := pwc.sendRspToTop(now, req, page) //发送rsp到top
-	if !ok {
-		return false
-	}
-
-	pwc.visit(setID, wayID)
-	pwc.topPort.Retrieve(now) //从top端口取走req
-	//记录
-	tracing.TraceReqReceive(req, pwc)
-	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
-	tracing.TraceReqComplete(req, pwc)
-
-	return true
-}
-
-func (pwc *PWC) handleTranslationMiss( //处理pwc未命中
-	now sim.VTimeInSec,
-	req *vm.TranslationReq,
-) bool {
-	if pwc.mshr.IsFull() {
-		return false
-	}
-
-	fetched := pwc.fetchBottom(now, req) //向下层的部件发送翻译请求
-	if fetched {
-		pwc.topPort.Retrieve(now) //从top端口取走req
-		tracing.TraceReqReceive(req, pwc)
-		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "miss")
-		return true
-	}
-
-	return false
 }
 
 func (pwc *PWC) vAddrToSetID(vAddr uint64) (setID int) {
 	return int(vAddr / pwc.pageSize % uint64(pwc.numSets))
-}
-
-func (pwc *PWC) sendRspToTop(
-	now sim.VTimeInSec,
-	req *vm.TranslationReq,
-	page vm.Page,
-) bool {
-	rsp := vm.TranslationRspBuilder{}.
-		WithSendTime(now).
-		WithSrc(pwc.topPort).
-		WithDst(req.Src).
-		WithRspTo(req.ID).
-		WithPage(page).
-		Build()
-
-	err := pwc.topPort.Send(rsp) //topport发送rsp
-
-	return err == nil
 }
 
 func (pwc *PWC) processPWCMSHRHit( //处理MSHR命中
@@ -240,11 +190,12 @@ func (pwc *PWC) processPWCMSHRHit( //处理MSHR命中
 	mshrEntry *mshrEntry,
 	req *vm.TranslationReq,
 ) bool {
+
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 
 	pwc.topPort.Retrieve(now)
 	tracing.TraceReqReceive(req, pwc)
-	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
+	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "mshr-hit")
 
 	return true
 }
@@ -256,6 +207,10 @@ func (pwc *PWC) processPWCMSHRMISS( //处理MSHR未命中
 	mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
 	mshrEntry.Requests = append(mshrEntry.Requests, req)
 
+	pwc.topPort.Retrieve(now)
+	tracing.TraceReqReceive(req, pwc)
+	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "mshr-miss")
+
 	pwq := pwqueue.Newpwqueueentry(req, 0) //把查找请求加入pwcache
 	err := pwc.pwqueue.Enqueue(pwq)
 	if err != nil {
@@ -264,8 +219,9 @@ func (pwc *PWC) processPWCMSHRMISS( //处理MSHR未命中
 
 	return true
 }
-func (pwc *PWC) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq) bool { //从bottom端口发送翻译请求
-	fetchBottom := pwcreq.TranslationReqBuilder{}.
+func (pwc *PWC) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq, hitlevel int) bool { //从bottom端口发送翻译请求
+
+	Req := vm.TranslationReqBuilder{}.
 		WithSendTime(now).
 		WithSrc(pwc.bottomPort).
 		WithDst(pwc.LowModule).
@@ -273,13 +229,22 @@ func (pwc *PWC) fetchBottom(now sim.VTimeInSec, req *vm.TranslationReq) bool { /
 		WithVAddr(req.VAddr).
 		WithDeviceID(req.DeviceID).
 		Build()
+
+	fetchBottom := TranslationReqBuilder{}.
+		WithSendTime(now).
+		WithSrc(pwc.bottomPort).
+		WithDst(pwc.LowModule).
+		WithPID(req.PID).
+		WithVAddr(req.VAddr).
+		WithDeviceID(req.DeviceID).
+		WithLantency(100 * (4 - hitlevel)).
+		WithReq(Req).
+		Build()
 	err := pwc.bottomPort.Send(fetchBottom)
 	if err != nil {
 		return false
 	}
 
-	//mshrEntry := pwc.mshr.Add(req.PID, req.VAddr) //把查找请求加入mshr
-	//mshrEntry.Requests = append(mshrEntry.Requests, req)
 	mshrEntry := pwc.mshr.Query(req.PID, req.VAddr)
 	mshrEntry.reqToBottom = fetchBottom
 
@@ -308,8 +273,8 @@ func (pwc *PWC) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rs
 		return true
 	}
 	l4index := page.VAddr >> (pwc.log2PageSize + 27) << (pwc.log2PageSize + 27)
-	l3index := page.VAddr << 25 >> 25 >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
-	l2index := page.VAddr << 34 >> 34 >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
+	l3index := page.VAddr >> (pwc.log2PageSize + 18) << (pwc.log2PageSize + 18)
+	l2index := page.VAddr >> (pwc.log2PageSize + 9) << (pwc.log2PageSize + 9)
 
 	setID := pwc.vAddrToSetID(l4index)
 	set := pwc.Sets[setID]

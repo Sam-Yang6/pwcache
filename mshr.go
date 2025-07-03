@@ -10,7 +10,7 @@ type mshrEntry struct {
 	pid         vm.PID
 	vAddr       uint64
 	Requests    []*vm.TranslationReq
-	reqToBottom *vm.TranslationReq
+	reqToBottom *TranslationReqpwc
 	page        vm.Page
 }
 
