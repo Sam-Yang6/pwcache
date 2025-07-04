@@ -93,6 +93,7 @@ func (b TranslationReqBuilder) Build() *TranslationReqpwc {
 	r.PID = b.pid
 	r.DeviceID = b.deviceID
 	r.Lantency = b.lantency
+	r.Req = b.req
 	return r
 }
 
