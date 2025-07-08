@@ -1,7 +1,6 @@
 package pwcache
 
 import (
-	"fmt"
 	"log"
 	"reflect"
 
