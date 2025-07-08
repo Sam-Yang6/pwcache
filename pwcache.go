@@ -144,7 +144,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 		pwc.visit(setID, wayID)
 		pwc.pwqueue.Updatehitl(i, 3)
 		tracing.TraceReqReceive(req, pwc)
-		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l2hit")
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
 		_ = pwc.fetchBottom(now, req, 3)
 		return true
 	}
@@ -157,7 +157,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 		pwc.visit(setID, wayID)
 		pwc.pwqueue.Updatehitl(i, 2)
 		tracing.TraceReqReceive(req, pwc)
-		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l3hit")
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
 		_ = pwc.fetchBottom(now, req, 2)
 		return true
 	}
@@ -170,7 +170,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 		pwc.visit(setID, wayID)
 		pwc.pwqueue.Updatehitl(i, 1)
 		tracing.TraceReqReceive(req, pwc)
-		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "l4hit")
+		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
 		_ = pwc.fetchBottom(now, req, 1)
 		return true
 	}
