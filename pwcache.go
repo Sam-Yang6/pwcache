@@ -181,6 +181,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 	pwc.pwqueue.Updatehitl(i, 0)
 	tracing.TraceReqReceive(req, pwc)
 	tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "miss")
+	fmt.Println("miss")
 	_ = pwc.fetchBottom(now, req, 0)
 	return true
 }
