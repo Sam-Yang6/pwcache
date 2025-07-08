@@ -287,7 +287,9 @@ func (pwc *PWC) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rs
 	if !ok {
 		panic("failed to evict")
 	}
-	set.Update(wayID, page) //把l4index保存在PWC中
+	page4 := page
+	page4.VAddr = l4index
+	set.Update(wayID, page4) //把l4index保存在PWC中
 	set.Visit(wayID)
 
 	setID = pwc.vAddrToSetID(l3index)
@@ -296,7 +298,9 @@ func (pwc *PWC) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rs
 	if !ok {
 		panic("failed to evict")
 	}
-	set.Update(wayID, page) //把l3index页表项保存在PWC中
+	page3 := page
+	page3.VAddr = l3index
+	set.Update(wayID, page3) //把l3index页表项保存在PWC中
 	set.Visit(wayID)
 
 	setID = pwc.vAddrToSetID(l2index)
@@ -305,7 +309,9 @@ func (pwc *PWC) parseBottom(now sim.VTimeInSec) bool { //解析bottom传回的rs
 	if !ok {
 		panic("failed to evict")
 	}
-	set.Update(wayID, page) //把l2index保存在PWC中
+	page2 := page
+	page2.VAddr = l2index
+	set.Update(wayID, page2) //把l2index保存在PWC中
 	set.Visit(wayID)
 
 	mshrEntry := pwc.mshr.GetEntry(rsp.Page.PID, rsp.Page.VAddr)
