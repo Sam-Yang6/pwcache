@@ -1,6 +1,7 @@
 package pwcache
 
 import (
+	"fmt"
 	"log"
 	"reflect"
 
@@ -145,6 +146,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 		pwc.pwqueue.Updatehitl(i, 3)
 		tracing.TraceReqReceive(req, pwc)
 		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
+		fmt.Println("l2 hit")
 		_ = pwc.fetchBottom(now, req, 3)
 		return true
 	}
@@ -158,6 +160,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 		pwc.pwqueue.Updatehitl(i, 2)
 		tracing.TraceReqReceive(req, pwc)
 		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
+		fmt.Println("l3 hit")
 		_ = pwc.fetchBottom(now, req, 2)
 		return true
 	}
@@ -171,6 +174,7 @@ func (pwc *PWC) PWClookup(now sim.VTimeInSec, i int) bool {
 		pwc.pwqueue.Updatehitl(i, 1)
 		tracing.TraceReqReceive(req, pwc)
 		tracing.AddTaskStep(tracing.MsgIDAtReceiver(req, pwc), pwc, "hit")
+		fmt.Println("l4 hit")
 		_ = pwc.fetchBottom(now, req, 1)
 		return true
 	}
